@@ -27,7 +27,7 @@ export default function Home() {
   const [url, setUrl] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [isAnalyzingClaims, setIsAnalyzingClaims] = useState(false);
-  const [result, setResult] = useState<any>(null);
+  const [result, setResult] = useState<{ url: string; content: string } | null>(null);
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [claims, setClaims] = useState<ClaimsResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -74,7 +74,7 @@ export default function Home() {
 
       // Update search metrics (operate on SearchResult[])
       const successCount = Array.isArray(searchResults)
-        ? searchResults.filter((r: any) => !!(r && (r.url || r.content))).length
+        ? searchResults.filter((r: SearchResult) => !!(r && (r.url || r.content))).length
         : 0;
       const failCount = Array.isArray(searchResults)
         ? (searchResults.length - successCount)
@@ -86,12 +86,12 @@ export default function Home() {
         successfulExtractions: successCount, // Since we're now doing extraction in one go
         failedExtractions: failCount,
         errors: (Array.isArray(searchResults) ? searchResults : [])
-          .map((result: any, index: number) => ({
+          .map((result: SearchResult, index: number) => ({
             claim: data.claims?.[index]?.claim || `Claim ${index + 1}`,
             stage: 'search' as const,
             error: result && (result.url || result.content) ? '' : 'No search results found'
           }))
-          .filter((item: any) => item.error)
+          .filter((item: { error: string }) => item.error)
       };
       
       // Update metrics
@@ -107,7 +107,7 @@ export default function Home() {
         searchResults, 
         aggregateTrustScore 
       };
-      setClaims(enrichedClaims as any);
+setClaims(enrichedClaims);
       
       return enrichedClaims;
   } catch (error) {
@@ -227,9 +227,9 @@ export default function Home() {
       const { results: factCheckResults, averageTrustScore } = await factCheckResponse.json();
       
       // Merge fact-check results into search results (by index, fallback by claim text)
-      const merged: SearchResult[] = results.map((result: any, index: number) => {
+      const merged: SearchResult[] = results.map((result: SearchResult, index: number) => {
         const fc = (Array.isArray(factCheckResults) && (factCheckResults[index] ||
-                  factCheckResults.find((r: any) => r?.claim === claimsData.claims[index]?.claim))) || undefined;
+                  factCheckResults.find((r: { claim?: string }) => r?.claim === claimsData.claims?.[index]?.claim))) || undefined;
         return {
           ...result,
           relevantChunks: result.relevantChunks || [],

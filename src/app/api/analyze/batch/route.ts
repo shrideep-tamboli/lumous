@@ -5,7 +5,11 @@ import * as cheerio from 'cheerio';
 
 interface ClaimObject {
   claim: string;
-  [key: string]: any;
+  url?: string;
+  content?: string;
+  title?: string;
+  search_date?: string;
+  // Add other known properties here if needed
 }
 
 type ClaimType = string | ClaimObject | undefined;
@@ -14,7 +18,6 @@ interface BatchAnalyzeRequest {
   urls: string[];
   claims?: ClaimType[];
 }
-
 interface ExtractContentResult {
   url: string;
   content: string;
@@ -22,10 +25,17 @@ interface ExtractContentResult {
   excerpt?: string;
   error?: string;
   claim?: string;
-  originalUrl?: any; // Store the original URL for debugging
+  originalUrl?: string; // Changed from 'any' to 'string'
+  [key: string]: string | undefined; // Added index signature
 }
 
-async function extractContent(url: any): Promise<ExtractContentResult> {
+// Update the function signature to accept string or object with url property
+interface UrlObject {
+  url: string;
+  [key: string]: unknown;
+}
+
+async function extractContent(url: string | UrlObject): Promise<ExtractContentResult> {
   // Handle case where url is not a string
   const urlString = typeof url === 'string' ? url : 
                    (url && typeof url === 'object' && 'url' in url ? url.url : String(url));
@@ -34,8 +44,7 @@ async function extractContent(url: any): Promise<ExtractContentResult> {
     return {
       url: urlString,
       content: '',
-      error: 'Invalid URL format',
-      originalUrl: url
+      error: 'Invalid URL format'
     };
   }
   try {
@@ -43,7 +52,7 @@ async function extractContent(url: any): Promise<ExtractContentResult> {
     const article = await extract(urlString);
     if (article?.content) {
       return {
-        url,
+        url: urlString,
         content: cleanText(article.content),
         title: article.title,
         excerpt: article.description,
@@ -66,7 +75,7 @@ async function extractContent(url: any): Promise<ExtractContentResult> {
     }
 
     return {
-      url,
+      url: urlString,
       content: cleanText(content),
       title: $('title').text(),
       excerpt: $('meta[property="og:description"]').attr('content'),
@@ -77,7 +86,6 @@ async function extractContent(url: any): Promise<ExtractContentResult> {
       url: urlString,
       content: '',
       error: error instanceof Error ? error.message : 'Failed to extract content',
-      originalUrl: url
     };
   }
 }

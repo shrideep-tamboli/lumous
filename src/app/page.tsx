@@ -3,6 +3,7 @@
 import { useState } from 'react';
 
 import ClaimsList from '@/components/ClaimsList';
+import InfoDialog from '@/components/InfoDialog';
 import { SearchResult, ClaimsResponse } from '@/types';
 
 interface RelevantChunk {
@@ -253,7 +254,8 @@ setClaims(enrichedClaims);
   };
 
   return (
-    <div className="min-h-screen flex flex-col items-center justify-center bg-gray-200 p-4">
+    <div className="min-h-screen flex flex-col items-center justify-center bg-gray-200 p-4 relative">
+      <InfoDialog />
       <div className="w-full max-w-2xl px-4 sm:px-6">
         <div className="text-center mb-12">
           <h1 className="text-5xl font-black text-black mb-4 tracking-tight">

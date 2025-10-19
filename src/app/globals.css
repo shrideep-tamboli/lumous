@@ -24,3 +24,37 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+/* In your global.css or equivalent */
+.verdict-support { background-color: #D1FAE5; color: #065F46; }
+.verdict-refute { background-color: #FEE2E2; color: #991B1B; }
+.verdict-unclear { background-color: #FEF3C7; color: #92400E; }
+.verdict-partial { background-color: #DBEAFE; color: #1E40AF; }
+
+/* Add this to your globals.css */
+.analysis-summary {
+  color: #1f2937; /* gray-800 */
+}
+
+.analysis-summary h3 {
+  color: #111827; /* gray-900 */
+  font-weight: 600;
+  margin-bottom: 1rem;
+}
+
+.metric-card {
+  background-color: #f9fafb; /* gray-50 */
+  padding: 0.75rem;
+  border-radius: 0.5rem;
+}
+
+.metric-label {
+  color: #6b7280; /* gray-500 */
+  font-size: 0.875rem;
+  margin-bottom: 0.25rem;
+}
+
+.metric-value {
+  color: #111827; /* gray-900 */
+  font-weight: 600;
+}

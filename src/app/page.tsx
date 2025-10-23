@@ -274,17 +274,32 @@ export default function Home() {
         throw new Error('Failed to search claims');
       }
       
-      const { urls } = await searchResponse.json();
+      const { urls } = await searchResponse.json(); // now urls: string[][]
       if (!urls || !urls.length) return [];
 
-      // 2. Extract content from search results
+      // Build normalized per-claim url lists and keep per-claim counts to regroup
+      const rawPerClaimUrls: string[][] = urls as string[][];
+      const perClaimUrls: string[][] = rawPerClaimUrls.map(group =>
+        (group || [])
+          .flatMap(u => String(u).split(/[,;\n\r]+/).map(s => s.trim()))
+          .filter(s => s.length > 0)
+      );
+
+      // Deduplicate each group's URLs while preserving order
+      const perClaimUrlsNormalized = perClaimUrls.map(arr => Array.from(new Set(arr)));
+
+      // Flatten and keep only http(s) URLs
+      const flatUrls: string[] = perClaimUrlsNormalized.flat().filter(s => /^https?:\/\//i.test(s));
+      if (flatUrls.length === 0) return [];
+
+      // 2. Extract content from search results (batch)
       setLoadingState((prev: LoadingState) => ({ ...prev, step3: false, step4: true }));
       
       const analyzeResponse = await fetch('/api/analyze/batch', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          urls: urls.filter(Boolean) // Remove any null/undefined URLs
+          urls: flatUrls
         }),
       });
 
@@ -292,21 +307,54 @@ export default function Home() {
         throw new Error('Failed to analyze search results');
       }
 
-      const { results } = await analyzeResponse.json();
-      
+      // Explicitly type the response to avoid `never` inference and safely access .content
+      interface AnalyzeBatchResult { url?: string | null; content?: string | null; relevantChunks?: any[]; [key: string]: any }
+      const analyzeJson = await analyzeResponse.json() as { results?: AnalyzeBatchResult[] } | any;
+      const rawResults: AnalyzeBatchResult[] = Array.isArray(analyzeJson?.results) ? analyzeJson.results : [];
+
+      // Normalize rawResults into SearchResult shape (guarantee url/content are strings)
+      const normalizedResults: SearchResult[] = rawResults.map((r) => ({
+        url: r.url || '',
+        content: r.content || '',
+        title: r.title || undefined,
+        excerpt: r.excerpt || undefined,
+        error: r.error || undefined,
+        relevantChunks: Array.isArray(r.relevantChunks) ? r.relevantChunks as any[] : [],
+      }));
+
+      // results correspond to flatUrls order
+
+      // Regroup results per claim (using normalizedResults)
+      const groupedResults: SearchResult[][] = [];
+      let offset = 0;
+      for (let i = 0; i < perClaimUrls.length; i++) {
+        const count = perClaimUrls[i]?.length || 0;
+        const group = normalizedResults.slice(offset, offset + count);
+        groupedResults.push(group);
+        offset += count;
+      }
+
       // Update analyzed count (Box 2) after batch analysis
-      const analyzedCount = results.filter((r: SearchResult) => !!r?.content).length;
+      // count items that have at least a url or content
+      const analyzedCount = normalizedResults.filter((r) => !!(r && (r.content || r.url))).length;
       setAnalysisState((prev: AnalysisState) => ({
         ...prev,
         analyzedCount: analyzedCount
       }));
       
       // 3. Prepare and log fact-checking request
+      // For each claim, send the extracted contents from up to 3 urls as an array (one per source)
       const factCheckRequest = {
-        claims: claimsData.claims.map((claim, index) => ({
-          claim: claim.claim,
-          content: results[index]?.content || ''
-        }))
+        claims: claimsData.claims.map((claim, index) => {
+          const group = groupedResults[index] || [];
+          const contentsArray = group
+            .slice(0, 3)
+            .map((g: SearchResult) => g.content || '');
+          return {
+            claim: claim.claim,
+            content: contentsArray
+          };
+        })
       };
       
       console.log('Sending to /api/factCheck:', JSON.stringify({
@@ -327,13 +375,17 @@ export default function Home() {
 
       const { results: factCheckResults, averageTrustScore } = await factCheckResponse.json();
       
-      // Merge fact-check results into search results (by index, fallback by claim text)
-      const merged: SearchResult[] = results.map((result: SearchResult, index: number) => {
+      // Merge fact-check results into groupedResults (assign verdict/reference/trustScore per claim)
+      const merged: SearchResult[] = groupedResults.map((group, index) => {
         const fc = (Array.isArray(factCheckResults) && (factCheckResults[index] ||
                   factCheckResults.find((r: { claim?: string }) => r?.claim === claimsData.claims?.[index]?.claim))) || undefined;
+        // Keep first group's result as representative and attach fc data
+        const representative: SearchResult = group.length > 0
+          ? group[0]
+          : { url: perClaimUrls[index]?.[0] || '', content: '' };
         return {
-          ...result,
-          relevantChunks: result.relevantChunks || [],
+          ...representative,
+          relevantChunks: group.flatMap((g: any) => g.relevantChunks || []),
           verdict: fc?.Verdict,
           reference: fc?.Reference,
           trustScore: typeof fc?.Trust_Score === 'number' ? fc.Trust_Score : undefined,

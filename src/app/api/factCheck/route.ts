@@ -45,7 +45,7 @@ function cosineSimilarity(a: number[], b: number[]): number {
 interface FactCheckRequest {
   claims: Array<{
     claim: string;
-    content: string;
+    content: string | string[];
   }>;
 }
 
@@ -63,6 +63,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'No claims provided' }, { status: 400 });
     }
 
+    // perClaimChunks will hold up to 3 best chunks per claim, selecting at most one chunk per source/url
     const perClaimChunks: Array<{ claim: string; chunks: string[] }> = [];
 
     for (const { claim, content } of claimContents) {
@@ -71,36 +72,49 @@ export async function POST(request: Request) {
         continue;
       }
 
-      const chunks = content
-        .split(/<p[^>]*>|\n/)
-        .map(c => c.replace(/<\/p>|<[^>]*>/g, '').trim())
-        .filter(c => c.length > 0);
+      // content may be a single string (joined html) or an array of strings (one per source url)
+      const sources: string[] = Array.isArray(content) ? content : String(content).split('\n---SOURCE---\n');
 
-      if (chunks.length === 0) {
-        perClaimChunks.push({ claim, chunks: [] });
-        continue;
+      const bestChunksPerSource: string[] = [];
+
+      // compute claim embedding once
+      const claimEmbedding = await generateEmbedding(claim);
+
+      for (const src of sources) {
+        const chunks = String(src)
+          .split(/<p[^>]*>|\n/)
+          .map(c => c.replace(/<\/p>|<[^>]*>/g, '').trim())
+          .filter(c => c.length > 20);
+
+        if (chunks.length === 0) continue;
+
+        // compute embeddings for the chunks in parallel (rate-limited inside function)
+        const chunkEmbeddings = await Promise.all(chunks.map(chunk => generateEmbedding(chunk)));
+
+        // find the best chunk for this source by cosine similarity
+        let best = { text: '', sim: -1 };
+        for (let i = 0; i < chunks.length; i++) {
+          const sim = cosineSimilarity(claimEmbedding, chunkEmbeddings[i] || []);
+          if (sim > best.sim) best = { text: chunks[i], sim };
+        }
+
+        if (best.sim > 0 && best.text) {
+          bestChunksPerSource.push(best.text);
+        }
+
+        // stop if we've already got 3 sources
+        if (bestChunksPerSource.length >= 3) break;
       }
 
-      const [claimEmbedding, ...chunkEmbeddings] = await Promise.all([
-        generateEmbedding(claim),
-        ...chunks.map(chunk => generateEmbedding(chunk))
-      ]);
-
-      const ranked = chunks
-        .map((text, i) => ({ text, sim: cosineSimilarity(claimEmbedding, chunkEmbeddings[i] || []) }))
-        .filter(x => x.sim > 0)
-        .sort((a, b) => b.sim - a.sim)
-        .slice(0, 2);
-
-      perClaimChunks.push({ claim, chunks: ranked.map(r => r.text) });
+      perClaimChunks.push({ claim, chunks: bestChunksPerSource.slice(0, 3) });
     }
 
-    const prompt = `You are an expert fact-checking assistant. For each item, compare the claim with the provided chunk texts. Decide a verdict and cite the exact line from the chunks that justifies it.
+    const prompt = `You are an expert fact-checking assistant. For each item, compare the claim with the provided chunk texts. Decide a verdict and cite up to three exact, word-for-word quotes from the chunks that justify it.
 
 Strictly output a JSON array where each element has exactly these keys:
 - claim: string
 - Verdict: one of ["Support","Partially Support","Unclear","Contradict","Refute"]
-- Reference: string (an exact, word-for-word quote from one of the chunks)
+- Reference: array of up to 3 strings (each must be an exact quote from one of the chunks)
 - Trust_Score: number (100 for Support, 65 for Partially Support, 50 for Unclear, 0 for Contradict or Refute)
 
 Do not add extra keys or text.`;
@@ -117,7 +131,7 @@ Do not add extra keys or text.`;
             properties: {
               claim: { type: Type.STRING },
               Verdict: { type: Type.STRING },
-              Reference: { type: Type.STRING },
+              Reference: { type: Type.ARRAY, items: { type: Type.STRING } }, // now array
               Trust_Score: { type: Type.NUMBER },
             },
             required: ["claim","Verdict","Reference","Trust_Score"]
@@ -129,7 +143,7 @@ Do not add extra keys or text.`;
     const text = gen.text;
     if (!text) return NextResponse.json({ error: 'No response from model' }, { status: 502 });
 
-    let parsed: Array<{ claim: string; Verdict: string; Reference: string; Trust_Score: number }> = [];
+    let parsed: Array<{ claim: string; Verdict: string; Reference: string[]; Trust_Score: number }> = [];
     try {
       parsed = JSON.parse(text);
     } catch {
@@ -149,7 +163,7 @@ Do not add extra keys or text.`;
     const results = parsed.map(item => ({
       claim: item.claim,
       Verdict: ['Support','Partially Support','Unclear','Contradict','Refute'].includes(item.Verdict) ? item.Verdict : 'Unclear',
-      Reference: item.Reference,
+      Reference: Array.isArray(item.Reference) ? item.Reference : (item.Reference ? [String(item.Reference)] : []),
       Trust_Score: typeof item.Trust_Score === 'number' ? item.Trust_Score : scoreFor(item.Verdict),
     }));
 

@@ -34,80 +34,82 @@ export async function POST(request: Request) {
     const searchPromises = claims.map(async (claim) => {
       const searchQuery = `${claim.claim} ${claim.search_date || ''}`.trim();
       let searchSource = 'none';
+      let urls: string[] = [];
       
       try {
-        // First try Tavily
-        let tavilyResponse;
+        // First try Tavily (request up to 5, we'll pick top 3)
         try {
-          tavilyResponse = await tvly.search(searchQuery, {
+          const tavilyResponse = await tvly.search(searchQuery, {
             include_answer: false,
             include_raw_content: false,
             include_domains: [],
             exclude_domains: originalUrl ? [new URL(originalUrl).hostname] : [],
-            max_results: 1
+            max_results: 3 // <-- changed to 3
           });
 
-          if (tavilyResponse?.results?.length > 0) {
-            searchSource = 'tavily';
-            return { url: tavilyResponse.results[0].url, source: searchSource };
+          if (tavilyResponse.results?.length) {
+            urls = tavilyResponse.results
+              .map(r => r.url)
+              .filter(u => !!u) as string[];
+            if (urls.length > 0) searchSource = 'tavily';
           }
-        } catch (tavilyError: unknown) {
-          const errorMessage = tavilyError instanceof Error ? tavilyError.message : 'Unknown error';
-          console.warn('Tavily search failed, falling back to DuckDuckGo:', errorMessage);
-          // Continue to DuckDuckGo fallback
+        } catch (tavilyError) {
+          console.error('Tavily search failed:', tavilyError);
         }
 
-        // Fallback to DuckDuckGo if Tavily fails or returns no results
-        try {
-          const ddgResponse = await fetch(
-            `https://serpapi.com/search?engine=duckduckgo&q=${encodeURIComponent(searchQuery)}&kl=us-en&api_key=${process.env.SERPAPI_KEY || '899ee3b0eb25789808adc1f0be51125c66bc3b572c1c3d0826b9197df1ad895d'}`,
-            { 
-              next: { revalidate: 3600 },
-              // Add timeout to prevent hanging
-              signal: AbortSignal.timeout(10000) // 10 second timeout
+        // If we still need more urls (less than 3), try SerpAPI/DuckDuckGo to fill
+        if (urls.length < 3) {
+          try {
+            const ddgResponse = await fetch(
+              `https://serpapi.com/search?engine=duckduckgo&q=${encodeURIComponent(searchQuery)}&kl=us-en&api_key=${process.env.SERPAPI_KEY || '899ee3b0eb25789808adc1f0be51125c66bc3b572c1c3d0826b9197df1ad895d'}`,
+              { 
+                next: { revalidate: 3600 },
+                signal: AbortSignal.timeout(10000)
+              }
+            );
+            
+            if (ddgResponse.ok) {
+              const ddgData = await ddgResponse.json();
+              const ddgUrls = (ddgData?.organic_results || [])
+                .map((r: any) => r.link)
+                .filter((u: string) => !!u);
+              // append until 3 unique urls
+              for (const u of ddgUrls) {
+                if (urls.length >= 3) break;
+                if (!urls.includes(u) && (!originalUrl || new URL(u).hostname !== new URL(originalUrl).hostname)) {
+                  urls.push(u);
+                }
+              }
+              if (urls.length > 0 && searchSource === 'none') searchSource = 'duckduckgo';
             }
-          );
-          
-          if (!ddgResponse.ok) {
-            throw new Error(`DuckDuckGo API error: ${ddgResponse.status} ${ddgResponse.statusText}`);
+          } catch (ddgError) {
+            console.error('DuckDuckGo search failed:', ddgError);
           }
-          
-          const ddgData = await ddgResponse.json();
-          if (ddgData?.organic_results?.length > 0) {
-            searchSource = 'duckduckgo';
-            return { url: ddgData.organic_results[0].link, source: searchSource };
-          }
-        } catch (ddgError) {
-          console.error('DuckDuckGo search failed:', ddgError);
-          // Continue to return null if both providers fail
         }
 
-        return { url: null, source: searchSource };
+        return { urls, source: searchSource };
       } catch (error) {
         console.error('Search error for claim:', claim.claim, error);
-        return null;
+        return { urls: [], source: 'none' };
       }
     });
 
     const results = await Promise.all(searchPromises);
     
-    // Extract URLs and sources from results
-    const urls = results.map(r => r?.url || null);
-    const sources = results.map(r => r?.source || 'none');
+    // results is array of { urls: string[], source }
+    const urlsPerClaim = results.map(r => r.urls || []);
+    const sources = results.map(r => r.source || 'none');
     
-    // Count successful searches and track sources
-    const successfulSearches = urls.filter(url => url !== null).length;
+    const successfulSearches = urlsPerClaim.filter(arr => (arr?.length || 0) > 0).length;
     const failedSearches = claims.length - successfulSearches;
     
-    // Generate error details for failed searches
     const errors = claims.map((claim, index) => ({
       claim: claim.claim,
       stage: 'search',
       source: sources[index],
-      error: urls[index] === null ? `No search results found (tried: ${sources[index] || 'none'})` : ''
-    })).filter(error => error.error);
-    
-    // Log search metrics
+      error: (urlsPerClaim[index]?.length || 0) === 0 ? `No search results found (tried: ${sources[index] || 'none'})` : ''
+    })).filter(e => e.error);
+
     const searchMetrics = {
       totalSearches: claims.length,
       successfulSearches,
@@ -121,7 +123,7 @@ export async function POST(request: Request) {
     console.log('Search metrics:', searchMetrics);
     
     return NextResponse.json({
-      urls,
+      urls: urlsPerClaim, // array per claim (up to 3 each)
       metrics: {
         ...searchMetrics,
         errors

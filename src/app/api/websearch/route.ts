@@ -14,10 +14,8 @@ interface WebSearchRequest {
   originalUrl?: string;
 }
 
-interface SearchResult {
-  url: string | null;
-  source: string;
-}
+// DDG organic result shape (we only need the link)
+interface DDGOrganicResult { link?: string }
 
 export async function POST(request: Request) {
   try {
@@ -71,8 +69,8 @@ export async function POST(request: Request) {
             if (ddgResponse.ok) {
               const ddgData = await ddgResponse.json();
               const ddgUrls = (ddgData?.organic_results || [])
-                .map((r: any) => r.link)
-                .filter((u: string) => !!u);
+                .map((r: DDGOrganicResult) => r.link)
+                .filter((u?: string): u is string => !!u);
               // append until 3 unique urls
               for (const u of ddgUrls) {
                 if (urls.length >= 3) break;

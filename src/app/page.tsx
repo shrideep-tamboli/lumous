@@ -49,11 +49,12 @@ export default function Home() {
   const [url, setUrl] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [isAnalyzingClaims, setIsAnalyzingClaims] = useState(false);
-  const [result, setResult] = useState<{ url: string; content: string } | null>(null);
-  const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
+  // prefix unused state names with _ or rename to avoid linter warnings
+  const [_result, setResult] = useState<{ url: string; content: string } | null>(null);
+  const [searchResultsState, setSearchResultsState] = useState<SearchResult[]>([]);
   const [claims, setClaims] = useState<ClaimsResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [metrics, setMetrics] = useState<ProcessingMetrics | null>(null);
+  const [_metrics, setMetrics] = useState<ProcessingMetrics | null>(null);
   const [showInstall, setShowInstall] = useState(false);
   
   // New state for progressive loading
@@ -119,18 +120,18 @@ export default function Home() {
       setMetrics(initialMetrics);
       
       // Step 2: Perform web search and fact-checking for the claims
-      const searchResults = await searchClaims(data, url);
-      console.log('Web search results:', searchResults);
+  const webSearchResults = await searchClaims(data, url);
+  console.log('Web search results:', webSearchResults);
 
       // Get the aggregate trust score from the first search result
-      const aggregateTrustScore = searchResults?.[0]?.aggregateTrustScore || 0;
+  const aggregateTrustScore = webSearchResults?.[0]?.aggregateTrustScore || 0;
 
       // Update search metrics (operate on SearchResult[])
-      const successCount = Array.isArray(searchResults)
-        ? searchResults.filter((r: SearchResult) => !!(r && (r.url || r.content))).length
+      const successCount = Array.isArray(webSearchResults)
+        ? webSearchResults.filter((r: SearchResult) => !!(r && (r.url || r.content))).length
         : 0;
-      const failCount = Array.isArray(searchResults)
-        ? (searchResults.length - successCount)
+      const failCount = Array.isArray(webSearchResults)
+        ? (webSearchResults.length - successCount)
         : 0;
       
       const searchMetrics = {
@@ -138,7 +139,7 @@ export default function Home() {
         failedSearches: failCount,
         successfulExtractions: successCount, // Since we're now doing extraction in one go
         failedExtractions: failCount,
-        errors: (Array.isArray(searchResults) ? searchResults : [])
+        errors: (Array.isArray(webSearchResults) ? webSearchResults : [])
           .map((result: SearchResult, index: number) => ({
             claim: data.claims?.[index]?.claim || `Claim ${index + 1}`,
             stage: 'search' as const,
@@ -155,11 +156,11 @@ export default function Home() {
       
       // Update final analysis state after all processing (Boxes 3, 4, 5)
       const verdictCounts = {
-        support: searchResults.filter((r) => r?.verdict === 'Support').length,
-        partially: searchResults.filter((r) => r?.verdict === 'Partially Support').length,
-        unclear: searchResults.filter((r) => r?.verdict === 'Unclear').length,
-        contradict: searchResults.filter((r) => r?.verdict === 'Contradict').length,
-        refute: searchResults.filter((r) => r?.verdict === 'Refute').length,
+        support: webSearchResults.filter((r: SearchResult) => r?.verdict === 'Support').length,
+        partially: webSearchResults.filter((r: SearchResult) => r?.verdict === 'Partially Support').length,
+        unclear: webSearchResults.filter((r: SearchResult) => r?.verdict === 'Unclear').length,
+        contradict: webSearchResults.filter((r: SearchResult) => r?.verdict === 'Contradict').length,
+        refute: webSearchResults.filter((r: SearchResult) => r?.verdict === 'Refute').length,
       };
       
       setAnalysisState((prev: AnalysisState) => ({
@@ -177,10 +178,10 @@ export default function Home() {
       });
       
       // Persist results in state
-      setSearchResults(searchResults);
+      setSearchResultsState(webSearchResults);
       const enrichedClaims = { 
         ...data, 
-        searchResults, 
+        searchResults: webSearchResults, 
         aggregateTrustScore 
       };
       setClaims(enrichedClaims);
@@ -308,9 +309,17 @@ export default function Home() {
       }
 
       // Explicitly type the response to avoid `never` inference and safely access .content
-      interface AnalyzeBatchResult { url?: string | null; content?: string | null; relevantChunks?: any[]; [key: string]: any }
-      const analyzeJson = await analyzeResponse.json() as { results?: AnalyzeBatchResult[] } | any;
-      const rawResults: AnalyzeBatchResult[] = Array.isArray(analyzeJson?.results) ? analyzeJson.results : [];
+      interface AnalyzeBatchResult { url?: string | null; content?: string | null; relevantChunks?: RelevantChunk[]; title?: string; excerpt?: string; error?: string; [key: string]: unknown }
+      const analyzeJson = await analyzeResponse.json() as unknown;
+      const rawResults: AnalyzeBatchResult[] = [];
+      if (analyzeJson && typeof analyzeJson === 'object' && 'results' in analyzeJson) {
+        const maybeResults = (analyzeJson as Record<string, unknown>)['results'];
+        if (Array.isArray(maybeResults)) {
+          for (const item of maybeResults) {
+            if (item && typeof item === 'object') rawResults.push(item as AnalyzeBatchResult);
+          }
+        }
+      }
 
       // Normalize rawResults into SearchResult shape (guarantee url/content are strings)
       const normalizedResults: SearchResult[] = rawResults.map((r) => ({
@@ -319,7 +328,7 @@ export default function Home() {
         title: r.title || undefined,
         excerpt: r.excerpt || undefined,
         error: r.error || undefined,
-        relevantChunks: Array.isArray(r.relevantChunks) ? r.relevantChunks as any[] : [],
+        relevantChunks: Array.isArray(r.relevantChunks) ? r.relevantChunks as RelevantChunk[] : [],
       }));
 
       // results correspond to flatUrls order
@@ -385,7 +394,7 @@ export default function Home() {
           : { url: perClaimUrls[index]?.[0] || '', content: '' };
         return {
           ...representative,
-          relevantChunks: group.flatMap((g: any) => g.relevantChunks || []),
+          relevantChunks: group.flatMap((g: SearchResult & { relevantChunks?: RelevantChunk[] }) => g.relevantChunks || []),
           verdict: fc?.Verdict,
           reference: fc?.Reference,
           trustScore: typeof fc?.Trust_Score === 'number' ? fc.Trust_Score : undefined,

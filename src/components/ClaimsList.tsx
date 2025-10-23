@@ -6,13 +6,6 @@ export type { SearchResult, ClaimsResponse, ClaimsListProps, RelevantChunk };
 export default function ClaimsList({ claims, searchResults = [] }: ClaimsListProps) {
   if (!claims?.claims?.length) return null;
 
-  const getPreviewText = (content: string, maxLength = 150) => {
-    if (!content) return '';
-    return content.length > maxLength 
-      ? `${content.substring(0, maxLength)}...` 
-      : content;
-  };
-
   // In ClaimsList.tsx, replace the return statement with:
 return (
   <div className="mt-8 p-6 border-2 border-black bg-white">

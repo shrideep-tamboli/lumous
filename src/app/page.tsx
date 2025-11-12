@@ -4,7 +4,8 @@ import { useState } from 'react';
 
 import ClaimsList from '@/components/ClaimsList';
 import InfoDialog from '@/components/InfoDialog';
-import { SearchResult, ClaimsResponse } from '@/types';
+import { ReclaimifyResponseViewer } from '@/components/ReclaimifyResponseViewer';
+import { SearchResult, ClaimsResponse, ReclaimifyApiResponse, FactCheckResult } from '@/types';
 
 interface RelevantChunk {
   text: string;
@@ -49,16 +50,28 @@ export default function Home() {
   const [url, setUrl] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [isAnalyzingClaims, setIsAnalyzingClaims] = useState(false);
+  const [mode, setMode] = useState<'analyze' | 'claimify' | 'reclaimify'>('analyze');
+  const [activeTab, setActiveTab] = useState<'analysis' | 'summary'>('analysis');
   // prefix unused state names with _ or rename to avoid linter warnings
   const [_result, setResult] = useState<{ url: string; content: string } | null>(null);
-  const [searchResultsState, setSearchResultsState] = useState<SearchResult[]>([]);
   const [claims, setClaims] = useState<ClaimsResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [_metrics, setMetrics] = useState<ProcessingMetrics | null>(null);
   const [showInstall, setShowInstall] = useState(false);
+  const [reclaimifyData, setReclaimifyData] = useState<ReclaimifyApiResponse | null>(null);
   
-  // New state for progressive loading
-  const [analysisState, setAnalysisState] = useState<AnalysisState>({});
+  // State for progressive loading
+  const [analysisState, setAnalysisState] = useState<AnalysisState>({
+    totalClaims: 0,
+    analyzedCount: 0,
+    verdicts: {
+      support: 0,
+      partially: 0,
+      unclear: 0,
+      contradict: 0,
+      refute: 0
+    },
+    avgTrustScore: 0
+  });
   const [loadingState, setLoadingState] = useState<LoadingState>({
     step1: false,
     step2: false,
@@ -70,134 +83,6 @@ export default function Home() {
   // State for claims panel
   const [showClaimsPanel, setShowClaimsPanel] = useState(false);
 
-  const analyzeClaims = async (content: string) => {
-    try {
-      setIsAnalyzingClaims(true);
-      setMetrics(null); // Reset metrics
-      
-      // Reset analysis state and loading state
-      setAnalysisState({});
-      setLoadingState({
-        step1: true,
-        step2: false,
-        step3: false,
-        step4: false,
-        step5: false,
-      });
-      
-      // Step 1: Extract claims
-      const response = await fetch('/api/claims', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ content }),
-      });
-      
-      if (!response.ok) {
-        throw new Error('Failed to analyze claims');
-      }
-      
-      const data = await response.json();
-      setClaims(data);
-      
-      // Update analysis state with claims count (Box 1)
-      setAnalysisState((prev: AnalysisState) => ({
-        ...prev,
-        totalClaims: data.claims?.length || 0
-      }));
-      setLoadingState((prev: LoadingState) => ({ ...prev, step1: false, step2: true }));
-      
-      // Initialize metrics
-      const initialMetrics: ProcessingMetrics = {
-        totalClaims: data.claims?.length || 0,
-        successfulSearches: 0,
-        failedSearches: 0,
-        successfulExtractions: 0,
-        failedExtractions: 0,
-        errors: []
-      };
-      setMetrics(initialMetrics);
-      
-      // Step 2: Perform web search and fact-checking for the claims
-  const webSearchResults = await searchClaims(data, url);
-  console.log('Web search results:', webSearchResults);
-
-      // Get the aggregate trust score from the first search result
-  const aggregateTrustScore = webSearchResults?.[0]?.aggregateTrustScore || 0;
-
-      // Update search metrics (operate on SearchResult[])
-      const successCount = Array.isArray(webSearchResults)
-        ? webSearchResults.filter((r: SearchResult) => !!(r && (r.url || r.content))).length
-        : 0;
-      const failCount = Array.isArray(webSearchResults)
-        ? (webSearchResults.length - successCount)
-        : 0;
-      
-      const searchMetrics = {
-        successfulSearches: successCount,
-        failedSearches: failCount,
-        successfulExtractions: successCount, // Since we're now doing extraction in one go
-        failedExtractions: failCount,
-        errors: (Array.isArray(webSearchResults) ? webSearchResults : [])
-          .map((result: SearchResult, index: number) => ({
-            claim: data.claims?.[index]?.claim || `Claim ${index + 1}`,
-            stage: 'search' as const,
-            error: result && (result.url || result.content) ? '' : 'No search results found'
-          }))
-          .filter((item: { error: string }) => item.error)
-      };
-      
-      // Update metrics
-      setMetrics({
-        ...initialMetrics,
-        ...searchMetrics
-      });
-      
-      // Update final analysis state after all processing (Boxes 3, 4, 5)
-      const verdictCounts = {
-        support: webSearchResults.filter((r: SearchResult) => r?.verdict === 'Support').length,
-        partially: webSearchResults.filter((r: SearchResult) => r?.verdict === 'Partially Support').length,
-        unclear: webSearchResults.filter((r: SearchResult) => r?.verdict === 'Unclear').length,
-        contradict: webSearchResults.filter((r: SearchResult) => r?.verdict === 'Contradict').length,
-        refute: webSearchResults.filter((r: SearchResult) => r?.verdict === 'Refute').length,
-      };
-      
-      setAnalysisState((prev: AnalysisState) => ({
-        ...prev,
-        analyzedCount: successCount,
-        verdicts: verdictCounts,
-        avgTrustScore: aggregateTrustScore
-      }));
-      setLoadingState({
-        step1: false,
-        step2: false,
-        step3: false,
-        step4: false,
-        step5: true,
-      });
-      
-      // Persist results in state
-      setSearchResultsState(webSearchResults);
-      const enrichedClaims = { 
-        ...data, 
-        searchResults: webSearchResults, 
-        aggregateTrustScore 
-      };
-      setClaims(enrichedClaims);
-      
-      // Show claims panel when analysis is complete
-      setShowClaimsPanel(true);
-      
-      return enrichedClaims;
-  } catch (error) {
-    console.error('Error analyzing claims:', error);
-    throw error;
-  } finally {
-    setIsAnalyzingClaims(false);
-  }
-};
-
   const handleAnalyze = async () => {
   if (!url.trim()) {
     setError('Please enter a URL');
@@ -208,40 +93,210 @@ export default function Home() {
   setError(null);
   setResult(null);
   setClaims(null);
-  
-  // Reset analysis and loading states
-  setAnalysisState({});
+  setReclaimifyData(null);
   setLoadingState({
-    step1: false,
+    step1: true,  // Starting step 1
     step2: false,
     step3: false,
     step4: false,
-    step5: false,
+    step5: false
   });
   setShowClaimsPanel(false);
   
   try {
-    // 1. First, fetch and extract content
-    const response = await fetch('/api/analyze', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ url: url.trim() }),
-    });
+    // 1. First call to reclaimify
+    setLoadingState(prev => ({ ...prev, step1: true }));
+    const reclaimifyResponse = await fetch(`/api/reclaimify?url=${encodeURIComponent(url.trim())}&categorize=true&disambiguate=true`);
     
-    if (!response.ok) {
-      const errorData = await response.json();
-      throw new Error(errorData.error || 'Failed to analyze URL');
+    if (!reclaimifyResponse.ok) {
+      const errorData = await reclaimifyResponse.json().catch(() => ({}));
+      throw new Error(errorData.error || 'Failed to process URL');
     }
     
-    const data = await response.json();
-    setResult(data);
+    const reclaimifyData: ReclaimifyApiResponse = await reclaimifyResponse.json();
+    setReclaimifyData(reclaimifyData);
+    setResult({ url: reclaimifyData.url || url.trim(), content: reclaimifyData.content || '' });
+
+    // 2. Extract verifiable claims
+    const categorized = Array.isArray(reclaimifyData.categorizedSentences) 
+      ? reclaimifyData.categorizedSentences 
+      : [];
     
-    // 2. Then analyze claims from the extracted content
-    const claimsData = await analyzeClaims(data.content);
-    setClaims(claimsData);
+    const verifiableList = categorized
+      .filter((item) => item.category === 'Verifiable')
+      .map((item) => item.sentence);
+
+    const searchDate = new Date().toISOString().split('T')[0];
+    const claimsData = {
+      claims: verifiableList.map((claim: string) => ({ claim, search_date: searchDate })),
+      search_date: searchDate,
+    };
+
+    setAnalysisState(prev => ({
+      ...prev,
+      totalClaims: claimsData.claims.length
+    }));
+
+    // 3. Call websearch
+    setLoadingState(prev => ({ ...prev, step1: false, step2: true }));
+    const webSearchResponse = await fetch('/api/websearch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ 
+        claims: claimsData.claims,
+        search_date: searchDate,
+        originalUrl: url.trim()
+      })
+    });
+
+    if (!webSearchResponse.ok) {
+      throw new Error('Failed to perform web search');
+    }
     
+    const webSearchData = await webSearchResponse.json();
+    const urlsPerClaim: string[][] = Array.isArray(webSearchData?.urls) ? webSearchData.urls : [];
+    
+    // Flatten URLs for batch extraction and create claim mapping
+    const flattenedUrls: string[] = [];
+    const claimsOnePerUrl: string[] = [];
+    
+    urlsPerClaim.forEach((urls, claimIndex) => {
+      urls.forEach(url => {
+        if (url) {
+          flattenedUrls.push(url);
+          claimsOnePerUrl.push(claimsData.claims[claimIndex]?.claim || '');
+        }
+      });
+    });
+
+    // 4. Call batch analysis with URLs and claims
+    setLoadingState(prev => ({ ...prev, step2: false, step3: true }));
+    
+    if (flattenedUrls.length === 0) {
+      throw new Error('No valid URLs found for analysis');
+    }
+    
+    const batchResponse = await fetch('/api/analyze/batch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ 
+        urls: flattenedUrls,
+        claims: claimsOnePerUrl
+      })
+    });
+
+    if (!batchResponse.ok) {
+      throw new Error('Failed to analyze content');
+    }
+
+    const batchData = await batchResponse.json();
+    const batchResults: Array<{ claim?: string; url?: string; content?: string; title?: string; excerpt?: string; error?: string; relevantChunks?: RelevantChunk[] }> = Array.isArray(batchData?.results) ? batchData.results : [];
+
+    // Group extracted contents per claim for fact checking
+    const contentsByClaim: Record<string, string[]> = {};
+    
+    batchResults.forEach((result) => {
+      const claimKey = (result?.claim || '').toString().trim();
+      const content = (result?.content || '').toString().trim();
+      
+      if (claimKey && content) {
+        if (!contentsByClaim[claimKey]) {
+          contentsByClaim[claimKey] = [];
+        }
+        contentsByClaim[claimKey].push(content);
+      }
+    });
+
+    // 5. Call fact check with claims and their associated content
+    setLoadingState(prev => ({ ...prev, step3: false, step4: true }));
+    
+    const factCheckClaims = Object.entries(contentsByClaim).map(([claim, content]) => ({
+      claim,
+      content: content.length === 1 ? content[0] : content
+    }));
+
+    let factCheckResults: FactCheckResult[] = [];
+    let averageTrustScore: number | undefined = undefined;
+    
+    if (factCheckClaims.length > 0) {
+      const factCheckResponse = await fetch('/api/factCheck', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          claims: factCheckClaims
+        })
+      });
+
+      if (!factCheckResponse.ok) {
+        throw new Error('Failed to perform fact checking');
+      }
+      
+      const fcJson = await factCheckResponse.json();
+      factCheckResults = Array.isArray(fcJson?.results) ? fcJson.results : [];
+      averageTrustScore = typeof fcJson?.averageTrustScore === 'number' ? fcJson.averageTrustScore : undefined;
+    }
+
+    // Merge fact-check results with batch extraction results per claim
+    const groupedByClaim: Record<string, SearchResult[]> = {};
+    batchResults.forEach((r) => {
+      const k = (r?.claim || '').toString().trim();
+      if (!k) return;
+      if (!groupedByClaim[k]) groupedByClaim[k] = [];
+      groupedByClaim[k].push({
+        url: String(r?.url || ''),
+        content: String(r?.content || ''),
+        title: r?.title || undefined,
+        excerpt: r?.excerpt || undefined,
+        error: r?.error || undefined,
+        relevantChunks: Array.isArray(r?.relevantChunks) ? r.relevantChunks : []
+      });
+    });
+
+    const mergedResults: SearchResult[] = claimsData.claims.map((c: { claim: string }, index: number) => {
+      const claimText = c.claim;
+      const group = groupedByClaim[claimText] || [];
+      const representative: SearchResult = group.length > 0
+        ? group[0]
+        : { url: '', content: '' };
+      const fc = factCheckResults.find((r) => (r?.claim || '').toString().trim() === claimText.trim());
+      return {
+        ...representative,
+        verdict: fc?.verdict || fc?.Verdict,
+        reference: fc?.reference || fc?.Reference,
+        trustScore: typeof fc?.trustScore === 'number' ? fc.trustScore :
+                    typeof fc?.Trust_Score === 'number' ? fc.Trust_Score :
+                    typeof fc?.trust_score === 'number' ? fc.trust_score : undefined,
+      } as SearchResult;
+    });
+
+    // Update analysis summary metrics
+    const verdictCounts = { support: 0, partially: 0, unclear: 0, contradict: 0, refute: 0 };
+    for (const fc of factCheckResults) {
+      const v = (fc?.verdict || fc?.Verdict || '').toString();
+      if (v === 'Support') verdictCounts.support++;
+      else if (v === 'Partially Support') verdictCounts.partially++;
+      else if (v === 'Unclear') verdictCounts.unclear++;
+      else if (v === 'Contradict') verdictCounts.contradict++;
+      else if (v === 'Refute') verdictCounts.refute++;
+    }
+    setAnalysisState((prev: AnalysisState) => ({
+      ...prev,
+      analyzedCount: mergedResults.length,
+      verdicts: verdictCounts,
+      avgTrustScore: typeof averageTrustScore === 'number' ? averageTrustScore : prev.avgTrustScore
+    }));
+
+    // Update final state with merged results so ClaimsList can render
+    setClaims({
+      ...claimsData,
+      searchResults: mergedResults,
+      analysis: batchData,
+      factChecks: factCheckResults
+    });
+    
+    setShowClaimsPanel(true);
+    setLoadingState(prev => ({ ...prev, step4: false, step5: true }));
+
   } catch (error) {
     console.error('Error:', error);
     setError(error instanceof Error ? error.message : 'An unknown error occurred');
@@ -250,9 +305,21 @@ export default function Home() {
   }
 };
 
+  const handleClaimify = async () => {
+    if (!url.trim()) {
+      setError('Please enter a URL');
+      return;
+    }
+    
+    // Redirect to claimify or reclaimify page based on mode
+    const path = mode === 'reclaimify' ? 're-claimify' : 'claimify';
+    window.location.href = `/${path}?url=${encodeURIComponent(url.trim())}`;
+    return;
+  };
+
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter') {
-      handleAnalyze();
+      mode === 'analyze' ? handleAnalyze() : handleClaimify();
     }
   };
 
@@ -392,12 +459,19 @@ export default function Home() {
         const representative: SearchResult = group.length > 0
           ? group[0]
           : { url: perClaimUrls[index]?.[0] || '', content: '' };
+        
+        // Debug log to see what we're getting
+        console.log(`Fact-check result for claim ${index}:`, fc);
+        
         return {
           ...representative,
           relevantChunks: group.flatMap((g: SearchResult & { relevantChunks?: RelevantChunk[] }) => g.relevantChunks || []),
-          verdict: fc?.Verdict,
-          reference: fc?.Reference,
-          trustScore: typeof fc?.Trust_Score === 'number' ? fc.Trust_Score : undefined,
+          // Map the fact-check fields to the expected case
+          verdict: fc?.verdict || fc?.Verdict, // Try both cases
+          reference: fc?.reference || fc?.Reference,
+          trustScore: typeof fc?.trustScore === 'number' ? fc.trustScore : 
+                     typeof fc?.Trust_Score === 'number' ? fc.Trust_Score :
+                     typeof fc?.trust_score === 'number' ? fc.trust_score : undefined,
         } as SearchResult;
       });
       
@@ -430,13 +504,59 @@ export default function Home() {
             ? 'w-1/2 flex-shrink-0' 
             : 'w-full'
         }`}>
-        <div className="text-center mb-12">
-          <h1 className="text-5xl font-black text-black mb-4 tracking-tight">
+        <div className="text-center mb-8">
+          <h1 className="text-5xl font-black text-black mb-2 tracking-tight">
             LUMOUS
           </h1>
-          <p className="text-gray-800 max-w-md mx-auto text-lg">
+          <p className="text-gray-800 max-w-md mx-auto text-lg mb-6">
             Illuminate the truth behind every headline
           </p>
+          
+          {/* Mode Toggle 
+          <div className="flex items-center justify-center mb-6">
+            <div className="flex items-center border-2 border-black rounded-lg overflow-hidden">
+              <button
+                onClick={() => setMode('analyze')}
+                className={`px-6 py-2 font-medium ${
+                  mode === 'analyze' 
+                    ? 'bg-black text-white' 
+                    : 'bg-white text-black hover:bg-gray-100'
+                } transition-colors duration-200`}
+              >
+                Analyze
+              </button>
+              <div className="h-6 w-0.5 bg-black"></div>
+              <button
+                onClick={() => setMode('claimify')}
+                className={`px-6 py-2 font-medium ${
+                  mode === 'claimify' 
+                    ? 'bg-black text-white' 
+                    : 'bg-white text-black hover:bg-gray-100'
+                } transition-colors duration-200`}
+              >
+                Claimify
+              </button>
+              <div className="h-6 w-0.5 bg-black"></div>
+              <button
+                onClick={() => setMode('reclaimify')}
+                className={`px-6 py-2 font-medium ${
+                  mode === 'reclaimify' 
+                    ? 'bg-black text-white' 
+                    : 'bg-white text-black hover:bg-gray-100'
+                } transition-colors duration-200`}
+              >
+                Re-claimify
+              </button>
+            </div>
+          </div>
+          
+          <p className="text-gray-600 text-sm">
+            {mode === 'analyze' 
+              ? 'Full analysis with fact-checking' 
+              : mode === 'claimify' 
+                ? 'Extract and view content' 
+                : 'Re-analyze and extract content'}
+          </p>*/}
         </div>
         
         <div className="bg-white p-8 rounded-none border-2 border-black shadow-[8px_8px_0_0_rgba(0,0,0,1)]">
@@ -458,11 +578,19 @@ export default function Home() {
               />
             </div>
             <button 
-              onClick={handleAnalyze}
+              onClick={mode === 'analyze' ? handleAnalyze : handleClaimify}
               disabled={isLoading}
               className={`bg-black text-white font-medium py-4 px-8 rounded-none border-2 border-black hover:bg-white hover:text-black transition-all duration-200 flex-shrink-0 ${isLoading ? 'opacity-70 cursor-not-allowed' : ''}`}
             >
-              {isLoading ? 'ANALYZING...' : 'ANALYZE'}
+              {isLoading 
+                ? (mode === 'analyze' 
+                    ? 'ANALYZING...' 
+                    : 'PROCESSING...') 
+                : mode === 'analyze' 
+                  ? 'ANALYZE' 
+                  : mode === 'claimify' 
+                    ? 'EXTRACT' 
+                    : 'RE-EXTRACT'}
             </button>
           </div>
           
@@ -472,10 +600,33 @@ export default function Home() {
             </div>
           )}
 
-          {(isAnalyzingClaims || loadingState.step5) && (
+          {(reclaimifyData || isAnalyzingClaims || loadingState.step5) && (
             <div className="mt-6 p-4 bg-white border border-black rounded">
-              <h3 className="font-bold text-black mb-3">Analysis Summary</h3>
-              <div className="grid grid-cols-2 md:grid-cols-5 gap-4 text-sm">
+              <div className="flex border-b border-gray-200 mb-4">
+                <button
+                  className={`py-2 px-4 font-medium text-sm ${
+                    activeTab === 'analysis' ? 'text-blue-600 border-b-2 border-blue-600' : 'text-gray-500 hover:text-gray-700'
+                  }`}
+                  onClick={() => setActiveTab('analysis')}
+                >
+                  Claimy Analysis
+                </button>
+                <button
+                  className={`py-2 px-4 font-medium text-sm ${
+                    activeTab === 'summary' ? 'text-blue-600 border-b-2 border-blue-600' : 'text-gray-500 hover:text-gray-700'
+                  }`}
+                  onClick={() => setActiveTab('summary')}
+                >
+                  Analysis Summary
+                </button>
+              </div>
+              
+              <div className={activeTab === 'analysis' ? 'block' : 'hidden'}>
+                {reclaimifyData && <ReclaimifyResponseViewer data={reclaimifyData} />}
+              </div>
+              
+              <div className={activeTab === 'summary' ? 'block' : 'hidden'}>
+                <div className="grid grid-cols-2 md:grid-cols-5 gap-4 text-sm">
                 {/* Box 1: Total Claims - Shows immediately after claims extraction */}
                 <div className="p-2 bg-gray-100 border border-gray-300 rounded">
                   <div className="text-gray-800">Total Claims</div>
@@ -549,6 +700,7 @@ export default function Home() {
                       analysisState.avgTrustScore ?? 0
                     )}
                   </div>
+                </div>
                 </div>
               </div>
             </div>

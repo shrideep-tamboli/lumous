@@ -1,7 +1,5 @@
 import { NextResponse } from 'next/server';
 import { extract } from '@extractus/article-extractor';
-import axios from 'axios';
-import * as cheerio from 'cheerio';
 
 interface ClaimObject {
   claim: string;
@@ -18,6 +16,7 @@ interface BatchAnalyzeRequest {
   urls: string[];
   claims?: ClaimType[];
 }
+
 interface ExtractContentResult {
   url: string;
   content: string;
@@ -35,123 +34,85 @@ interface UrlObject {
   [key: string]: unknown;
 }
 
-async function extractContent(url: string | UrlObject): Promise<ExtractContentResult> {
+// Configure article extractor with custom options
+const extractorOptions = {
+  headers: {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Cache-Control': 'no-cache',
+    'Pragma': 'no-cache',
+    'Referer': 'https://www.google.com/'
+  },
+  // Add any additional extractor options here
+  // For example: forceExtractor: 'default',
+};
+
+function cleanText(text: string): string {
+  if (!text) return '';
+  return text
+    .replace(/\s+/g, ' ')
+    .replace(/\n+/g, '\n')
+    .trim();
+}
+
+// Convert HTML to plain text (lightweight)
+function stripHtml(html: string): string {
+  if (!html) return '';
+  return cleanText(String(html).replace(/<[^>]*>/g, ' '));
+}
+
+async function extractContent(url: string | UrlObject, claim?: string): Promise<ExtractContentResult> {
   // Handle case where url is not a string
-  const urlString = typeof url === 'string' ? url :
-                   (url && typeof url === 'object' && 'url' in url ? String((url as UrlObject).url) : String(url));
+  const urlString = typeof url === 'string' 
+    ? url 
+    : (url && typeof url === 'object' && 'url' in url) 
+      ? String((url as UrlObject).url) 
+      : String(url);
 
   if (typeof urlString !== 'string' || !urlString.startsWith('http')) {
     return {
       url: urlString,
       content: '',
-      error: 'Invalid URL format'
+      error: 'Invalid URL format',
+      claim
     };
   }
 
   try {
-    // 1. Try lightweight HTML fetch + cheerio first (strip scripts/styles and extract <p> tags)
-    const res = await axios.get(urlString, {
-      timeout: 10000,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-        Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
-      }
+    // Use article-extractor's built-in fetching
+    const article = await extract(urlString, {
+      // Add any necessary options here
+      // The extractor will handle the fetching with sensible defaults
     });
-
-    const $ = cheerio.load(res.data);
-    // remove noisy elements
-    $('script, style, noscript, iframe, svg, meta, link').remove();
-
-    // Collect paragraph texts, prefer longer paragraphs
-    let pTexts = $('p')
-      .map((_, el) => $(el).text().replace(/\s+/g, ' ').trim())
-      .get()
-      .filter(t => t.length > 20);
-
-    // If not enough paragraph content, try article/main/body
-    if (!pTexts || pTexts.length === 0) {
-      const articleText = ($('article').text() || $('main').text() || $('body').text() || '').replace(/\s+/g, ' ').trim();
-      if (articleText && articleText.length > 100) {
-        // split into pseudo-paragraphs to keep chunks manageable
-        pTexts = articleText.match(/(.{80,1000}?(?:\.|\n|$))/g)?.map(s => s.trim()) || [articleText];
-      }
-    }
-
-    if (pTexts && pTexts.length > 0) {
-      const joined = pTexts.slice(0, 20).join('\n\n');
+    
+    if (article?.content && article.content.trim().length > 50) {
       return {
         url: urlString,
-        content: cleanText(joined),
-        title: $('title').text() || undefined,
-        excerpt: $('meta[property="og:description"]').attr('content') || undefined,
+        content: stripHtml(String(article.content)),
+        title: article.title || undefined,
+        excerpt: article.description || undefined,
+        claim
       };
     }
 
-    // 2. Fallback: use article extractor if cheerio didn't yield useful paragraphs
-    try {
-      const article = await extract(urlString);
-      if (article?.content && article.content.trim().length > 50) {
-        return {
-          url: urlString,
-          content: cleanText(String(article.content)),
-          title: article.title,
-          excerpt: article.description,
-        };
-      }
-    } catch (e) {
-      // swallow and continue to final fallback
-      console.warn(`Article extractor failed for ${urlString}:`, e instanceof Error ? e.message : e);
-    }
-
-    // 3. Last-resort: attempt simple fallback selectors and text cleaning
-    const fallbackText = ($('article').text() || $('main').text() || $('body').text() || '')
-      .replace(/\s+/g, ' ')
-      .trim();
-
-    if (fallbackText.length > 20) {
-      return {
-        url: urlString,
-        content: cleanText(fallbackText),
-        title: $('title').text(),
-        excerpt: $('meta[property="og:description"]').attr('content'),
-      };
-    }
-
+    // If no content was extracted, return an error
     return {
       url: urlString,
       content: '',
-      error: 'No extractable content found'
+      error: 'No extractable content found using article extractor',
+      claim
     };
+    
   } catch (error) {
     console.error(`Error extracting content from ${urlString}:`, error);
-    // try extractor as last-ditch effort on network/parsing errors
-    try {
-      const article = await extract(urlString);
-      if (article?.content) {
-        return {
-          url: urlString,
-          content: cleanText(String(article.content)),
-          title: article.title,
-          excerpt: article.description,
-        };
-      }
-    } catch (e) {
-      // noop
-    }
-
     return {
       url: urlString,
       content: '',
       error: error instanceof Error ? error.message : 'Failed to extract content',
+      claim
     };
   }
-}
-
-function cleanText(text: string): string {
-  return text
-    .replace(/\s+/g, ' ')
-    .replace(/\n+/g, '\n')
-    .trim();
 }
 
 export async function POST(request: Request) {
@@ -165,76 +126,153 @@ export async function POST(request: Request) {
       );
     }
 
-    // Normalize incoming URL entries: some entries may contain multiple URLs joined by commas/newlines
-    const processedUrls = urls.flatMap(u => {
-      if (!u) return [] as string[];
-      // split on commas, semicolons or newlines (some providers return CSV-like strings)
-      return String(u)
-        .split(/[,;\n\r]+/)
-        .map(s => s.trim())
-        .filter(s => s.length > 0);
-    });
+    // When claims are provided and lengths match, preserve 1:1 URL-to-claim alignment
+    type UrlItem = { url: string; claim?: string };
+    let items: UrlItem[] = [];
+    const hasAlignedClaims = Array.isArray(claims) && claims.length === urls.length;
 
-    // Deduplicate and keep only http/https urls
-    const uniqueProcessedUrls = Array.from(new Set(processedUrls)).filter(s => /^https?:\/\//i.test(s));
+    if (hasAlignedClaims) {
+      items = urls.map((u, i) => ({
+        url: String(u || '').trim(),
+        claim: typeof claims![i] === 'string' ? String(claims![i]) : undefined,
+      })).filter(it => /^https?:\/\//i.test(it.url));
+    } else {
+      // Fallback normalization for generic inputs (may contain comma/newline-separated URLs)
+      const processedUrls = urls.flatMap(u => {
+        if (!u) return [];
+        return String(u)
+          .split(/[,;\n\r]+/)
+          .map(s => s.trim())
+          .filter(s => s.length > 0);
+      });
+      const uniqueProcessedUrls = Array.from(new Set(processedUrls))
+        .filter((s): s is string => typeof s === 'string' && /^https?:\/\//i.test(s));
+      items = uniqueProcessedUrls.map(u => ({ url: u }));
+    }
 
-    if (uniqueProcessedUrls.length === 0) {
+    if (items.length === 0) {
       return NextResponse.json(
         { error: 'No valid URLs after normalization' },
         { status: 400 }
       );
     }
 
-    // Process all URLs in parallel with a concurrency limit
-    const BATCH_SIZE = 3; // Process 3 URLs at a time
+    // Process all URLs in parallel with concurrency control
+    const CONCURRENCY_LIMIT = 10; // Number of concurrent requests
+    const REQUEST_TIMEOUT = 30000; // 30 seconds timeout per request
+    
+    // Process URLs in parallel with concurrency control
+    const processUrl = async (item: { url: string; claim?: string }): Promise<ExtractContentResult> => {
+      try {
+        // Add a timeout to prevent hanging requests
+        const timeoutPromise = new Promise<never>((_, reject) => 
+          setTimeout(() => reject(new Error('Request timeout')), REQUEST_TIMEOUT)
+        );
+        
+        // Race between the extraction and the timeout
+        const result = await Promise.race([
+          extractContent(item.url, item.claim),
+          timeoutPromise
+        ]);
+        
+        return result;
+      } catch (error) {
+        console.error(`Error processing ${item.url}:`, error);
+        return {
+          url: item.url,
+          content: '',
+          error: error instanceof Error ? error.message : 'Unknown error during processing',
+          claim: item.claim || ''
+        };
+      }
+    };
+    
+    // Process all URLs with controlled concurrency
+    const CONCURRENCY = 10; // Number of concurrent requests
     const results: ExtractContentResult[] = [];
     
-    for (let i = 0; i < uniqueProcessedUrls.length; i += BATCH_SIZE) {
-      const batch = uniqueProcessedUrls.slice(i, i + BATCH_SIZE);
-      const batchResults = await Promise.all(batch.map((url, index) => {
-        // attempt to associate a claim if caller provided `claims` with a 1:1 mapping
-        const claimIndex = i + index;
-        let claimText = `Claim ${claimIndex + 1}`;
-        try {
-          const claim: ClaimType = claims?.[claimIndex];
-          if (typeof claim === 'string') claimText = claim;
-          else if (claim && typeof claim === 'object' && 'claim' in claim) claimText = (claim as ClaimObject).claim;
-        } catch (e) {
-          // ignore and use default claimText
-        }
-
-        return extractContent(url).then(result => ({
-          ...result,
-          claim: claimText
-        }));
-      }));
-      
-      results.push(...batchResults);
-    }
-
-    // Calculate metrics
-    const successfulExtractions = results.filter(r => r.content).length;
-    const failedExtractions = results.length - successfulExtractions;
-    
-    return NextResponse.json({ 
-      results,
-      metrics: {
-        totalExtractions: results.length,
-        successfulExtractions,
-        failedExtractions,
-        errors: results
-          .filter(r => r.error)
-          .map(r => ({
-            claim: r.claim || 'Unknown claim',
-            stage: 'extraction' as const,
-            error: r.error || 'Unknown error'
-          }))
+    // Process URLs in chunks with controlled concurrency
+    const processInBatches = async (work: UrlItem[], batchSize: number) => {
+      for (let i = 0; i < work.length; i += batchSize) {
+        const batch = work.slice(i, i + batchSize);
+        const batchPromises = batch.map(item => processUrl(item));
+        const batchResults = await Promise.allSettled(batchPromises);
+        
+        // Process batch results
+        batchResults.forEach(result => {
+          if (result.status === 'fulfilled') {
+            results.push(result.value);
+          } else {
+            results.push({
+              url: '',
+              content: '',
+              error: result.reason?.message || 'Unknown error',
+              claim: ''
+            });
+          }
+        });
+        
+        console.log(`Processed batch ${i / batchSize + 1} of ${Math.ceil(work.length / batchSize)}`);
       }
-    });
+    };
+    
+    try {
+      const MAX_CONTENT_CHARS = 4000;
+      await processInBatches(items, CONCURRENCY);
+      
+      // Filter out any undefined results and ensure all required fields are present
+      const validResults = results
+        .filter(Boolean)
+        .map(result => ({
+          url: result.url || '',
+          content: (result.content || '').slice(0, MAX_CONTENT_CHARS),
+          title: result.title,
+          excerpt: result.excerpt,
+          error: result.error,
+          claim: result.claim || ''
+        }));
+      
+      // Calculate metrics
+      const successfulExtractions = validResults.filter(r => r.content && !r.error).length;
+      const failedExtractions = validResults.length - successfulExtractions;
+      
+      console.log(`Batch processing complete. Success: ${successfulExtractions}, Failed: ${failedExtractions}`);
+      
+      return NextResponse.json({ 
+        results: validResults,
+        metrics: {
+          totalExtractions: validResults.length,
+          successfulExtractions,
+          failedExtractions,
+          errors: validResults
+            .filter(r => r.error)
+            .map(r => ({
+              url: r.url || 'Unknown URL',
+              claim: r.claim || 'Unknown claim',
+              stage: 'extraction' as const,
+              error: r.error || 'Unknown error'
+            }))
+        }
+      }, { status: 200 });
+      
+    } catch (error) {
+      console.error('Error in batch processing:', error);
+      return NextResponse.json(
+        { 
+          error: 'Failed to process batch',
+          message: error instanceof Error ? error.message : 'Unknown error'
+        },
+        { status: 500 }
+      );
+    }
+    
   } catch (error) {
     console.error('Error in batch processing:', error);
     return NextResponse.json(
-      { error: 'Failed to process batch request' },
+      { 
+        error: 'Failed to process batch request',
+        details: error instanceof Error ? error.message : 'Unknown error'
+      },
       { status: 500 }
     );
   }

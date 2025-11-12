@@ -1,7 +1,4 @@
-import { SearchResult, ClaimsResponse, ClaimsListProps, RelevantChunk } from '@/types';
-
-// Re-export types for backward compatibility
-export type { SearchResult, ClaimsResponse, ClaimsListProps, RelevantChunk };
+import { ClaimsListProps, SearchResult } from '@/types';
 
 export default function ClaimsList({ claims, searchResults = [] }: ClaimsListProps) {
   if (!claims?.claims?.length) return null;
@@ -12,7 +9,7 @@ return (
     
     <div className="space-y-4">
       {claims.claims.map((claim, index) => {
-        const result = searchResults?.[index];
+        const result: SearchResult | undefined = searchResults?.[index];
         if (!result) return null;
 
         return (
@@ -20,11 +17,27 @@ return (
             <div className="flex justify-between items-start">
               <div className="flex-1">
                 <p className="text-gray-900 font-medium">Claim: {claim.claim}</p>
-                {result.reference && (
-                  <p className="mt-1 text-sm text-gray-600">
-                    <span className="font-medium">Reference:</span> {result.reference}
-                  </p>
-                )}
+                {(() => {
+                  const ref = result.reference ?? result.Reference;
+                  if (!ref) return null;
+                  if (Array.isArray(ref)) {
+                    return (
+                      <div className="mt-1 text-sm text-gray-600">
+                        <span className="font-medium">Reference:</span>
+                        <ul className="list-disc list-inside mt-1 space-y-0.5">
+                          {ref.map((r: string, i: number) => (
+                            <li key={i}>{r}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    );
+                  }
+                  return (
+                    <p className="mt-1 text-sm text-gray-600">
+                      <span className="font-medium">Reference:</span> {String(ref)}
+                    </p>
+                  );
+                })()}
                 {result.url && (
                   <a 
                     href={result.url} 
@@ -38,20 +51,27 @@ return (
               </div>
               
               <div className="ml-4 text-right">
-                {result.verdict && (
+                {(result.verdict || result.Verdict) && (
                   <span className={`inline-block px-2 py-1 rounded text-sm font-medium ${
-                    result.verdict === 'Support' ? 'bg-green-100 text-green-800' :
-                    result.verdict === 'Refute' ? 'bg-red-100 text-red-800' :
+                    (result.verdict || result.Verdict) === 'Support' ? 'bg-green-100 text-green-800' :
+                    (result.verdict || result.Verdict) === 'Refute' || (result.verdict || result.Verdict) === 'Contradict' ? 'bg-red-100 text-red-800' :
                     'bg-yellow-100 text-yellow-800'
                   }`}>
-                    {result.verdict}
+                    {result.verdict || result.Verdict}
                   </span>
                 )}
-                {typeof result.trustScore === 'number' && (
-                  <div className="mt-1 text-lg font-bold">
-                    {result.trustScore}
-                  </div>
-                )}
+                {(() => {
+                  const trust = typeof result.trustScore === 'number' ? result.trustScore :
+                                 typeof result.Trust_Score === 'number' ? result.Trust_Score : undefined;
+                  if (typeof trust === 'number') {
+                    return (
+                      <div className="mt-1 text-lg font-bold">
+                        {trust}
+                      </div>
+                    );
+                  }
+                  return null;
+                })()}
               </div>
             </div>
           </div>
